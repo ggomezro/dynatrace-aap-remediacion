@@ -1,0 +1,6 @@
+{
+  "scenario": "nginx_down",
+  "host": "target01",
+  "problem_id": "P-12345",
+  "title": "Process unavailable: nginx"
+}

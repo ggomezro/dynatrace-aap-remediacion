@@ -1,0 +1,21 @@
+---
+- name: Remediar nginx caído
+  hosts: "{{ target_host | default('target01') }}"
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Asegurar que nginx esté iniciado
+      ansible.builtin.service:
+        name: nginx
+        state: started
+
+    - name: Esperar a que el puerto 80 responda
+      ansible.builtin.wait_for:
+        port: 80
+        timeout: 30
+
+    - name: Validar respuesta HTTP 200
+      ansible.builtin.uri:
+        url: http://localhost
+        status_code: 200
