@@ -1,0 +1,11 @@
+---
+- name: "Caos | Detener nginx (demo de remediación)"
+  hosts: "{{ target_host | default('target01') }}"
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Detener nginx
+      ansible.builtin.service:
+        name: nginx
+        state: stopped
