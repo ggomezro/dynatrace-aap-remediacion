@@ -17,3 +17,4 @@
             extra_vars:
               target_host: "{{ event.payload.host }}"
               problem_id: "{{ event.payload.problem_id }}"
+              dt_problem_id: "{{ event.payload.dt_problem_id | default('') }}"

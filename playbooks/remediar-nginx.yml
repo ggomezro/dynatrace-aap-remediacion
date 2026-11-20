@@ -4,18 +4,96 @@
   become: true
   gather_facts: false
 
+  vars:
+    dt_url: "{{ lookup('ansible.builtin.env', 'DT_URL') }}"
+    dt_token: "{{ lookup('ansible.builtin.env', 'DT_TOKEN') }}"
+    job_id: "{{ awx_job_id | default('manual') }}"
+    job_url: "https://aap.benji-gabo.com/execution/jobs/playbook/{{ job_id }}/output"
+    comentar: "{{ (dt_problem_id | default('')) | length > 0 and dt_url | length > 0 }}"
+
   tasks:
-    - name: Asegurar que nginx esté iniciado
-      ansible.builtin.service:
-        name: nginx
-        state: started
-
-    - name: Esperar a que el puerto 80 responda
-      ansible.builtin.wait_for:
-        port: 80
-        timeout: 30
-
-    - name: Validar respuesta HTTP 200
+    - name: "Dynatrace | Comentario de inicio"
       ansible.builtin.uri:
-        url: http://localhost
-        status_code: 200
+        url: "{{ dt_url }}/api/v2/problems/{{ dt_problem_id }}/comments"
+        method: POST
+        headers:
+          Authorization: "Api-Token {{ dt_token }}"
+        body_format: json
+        body:
+          message: "🔧 Remediación iniciada por Ansible (job #{{ job_id }}): reiniciando nginx en {{ inventory_hostname }}."
+          context: "Ansible Automation Platform"
+        status_code: [200, 201, 204]
+      delegate_to: localhost
+      become: false
+      when: comentar | bool
+
+    - name: Remediación
+      block:
+        - name: Asegurar que nginx esté iniciado
+          ansible.builtin.service:
+            name: nginx
+            state: started
+
+        - name: Esperar a que el puerto 80 responda
+          ansible.builtin.wait_for:
+            port: 80
+            timeout: 30
+
+        - name: Validar respuesta HTTP 200
+          ansible.builtin.uri:
+            url: http://localhost
+            status_code: 200
+
+        - name: "Dynatrace | Comentario de éxito"
+          ansible.builtin.uri:
+            url: "{{ dt_url }}/api/v2/problems/{{ dt_problem_id }}/comments"
+            method: POST
+            headers:
+              Authorization: "Api-Token {{ dt_token }}"
+            body_format: json
+            body:
+              message: "✅ Remediación exitosa: nginx activo y respondiendo HTTP 200 en {{ inventory_hostname }}. Job: {{ job_url }}"
+              context: "Ansible Automation Platform"
+            status_code: [200, 201, 204]
+          delegate_to: localhost
+          become: false
+          when: comentar | bool
+
+        - name: "Dynatrace | Evento en la línea de tiempo del host"
+          ansible.builtin.uri:
+            url: "{{ dt_url }}/api/v2/events/ingest"
+            method: POST
+            headers:
+              Authorization: "Api-Token {{ dt_token }}"
+            body_format: json
+            body:
+              eventType: CUSTOM_INFO
+              title: "Remediación Ansible: nginx reiniciado"
+              entitySelector: "type(HOST),entityName.equals({{ inventory_hostname }})"
+              properties:
+                job: "{{ job_url }}"
+                problema: "{{ problem_id | default('') }}"
+            status_code: [200, 201, 202]
+          delegate_to: localhost
+          become: false
+          when: dt_url | length > 0
+
+      rescue:
+        - name: "Dynatrace | Comentario de falla"
+          ansible.builtin.uri:
+            url: "{{ dt_url }}/api/v2/problems/{{ dt_problem_id }}/comments"
+            method: POST
+            headers:
+              Authorization: "Api-Token {{ dt_token }}"
+            body_format: json
+            body:
+              message: "❌ Remediación fallida en {{ inventory_hostname }}: requiere intervención humana. Job: {{ job_url }}"
+              context: "Ansible Automation Platform"
+            status_code: [200, 201, 204]
+          delegate_to: localhost
+          become: false
+          when: comentar | bool
+
+        - name: Marcar el job como fallido
+          ansible.builtin.fail:
+            msg: "La remediación de nginx falló."
