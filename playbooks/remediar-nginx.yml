@@ -70,13 +70,12 @@
               eventType: CUSTOM_INFO
               title: "Remediación Ansible: nginx reiniciado"
               entitySelector: "type(HOST),entityName.equals({{ inventory_hostname }})"
-              properties:
-                job: "{{ job_url }}"
-                problema: "{{ problem_id | default('') }}"
+              properties: "{{ {'job': job_url, 'problema': problem_id | default('')} | dict2items | rejectattr('value', 'equalto', '') | items2dict }}"
             status_code: [200, 201, 202]
           delegate_to: localhost
           become: false
           when: dt_url | length > 0
+          ignore_errors: true  # el evento es informativo: no debe tumbar la remediación
 
       rescue:
         - name: "Dynatrace | Comentario de falla"
