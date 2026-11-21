@@ -1,0 +1,124 @@
+---
+- name: Remediar fuerza bruta SSH
+  hosts: "{{ target_host | default('target01') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    dt_url: "{{ lookup('ansible.builtin.env', 'DT_URL') }}"
+    dt_token: "{{ lookup('ansible.builtin.env', 'DT_TOKEN') }}"
+    job_id: "{{ awx_job_id | default('manual') }}"
+    job_url: "https://aap.benji-gabo.com/execution/jobs/playbook/{{ job_id }}/output"
+    comentar: "{{ (dt_problem_id | default('')) | length > 0 and dt_url | length > 0 }}"
+    umbral: 5            # intentos fallidos mínimos para bloquear una IP
+    ventana: "-15min"    # ventana de logs de sshd a revisar
+    bloqueo_seg: 900     # el bloqueo expira solo (15 min) para que el laboratorio se reinicie
+    ips_protegidas: []   # IPs que nunca se bloquean (p. ej. la de AAP), además de la que usa este job
+
+  tasks:
+    - name: "Dynatrace | Comentario de inicio"
+      ansible.builtin.uri:
+        url: "{{ dt_url }}/api/v2/problems/{{ dt_problem_id }}/comments"
+        method: POST
+        headers:
+          Authorization: "Api-Token {{ dt_token }}"
+        body_format: json
+        body:
+          message: "🛡️ Remediación iniciada por Ansible (job #{{ job_id }}): analizando intentos de login en {{ inventory_hostname }}."
+          context: "Ansible Automation Platform"
+        status_code: [200, 201, 204]
+      delegate_to: localhost
+      become: false
+      when: comentar | bool
+
+    - name: Remediación
+      block:
+        - name: IP desde la que AAP está conectado (nunca se bloquea)
+          ansible.builtin.shell: echo "${SSH_CONNECTION%% *}"
+          register: ip_aap
+          changed_when: false
+
+        - name: Contar intentos fallidos por IP en los logs de sshd
+          ansible.builtin.shell: |
+            journalctl -u sshd --since "{{ ventana }}" --no-pager \
+              | grep -E "Invalid user|Failed password|authenticating user" \
+              | grep -oE "from ([0-9]{1,3}\.){3}[0-9]{1,3}" | awk '{print $2}' \
+              | sort | uniq -c | awk '$1 >= {{ umbral }} {print $2}'
+          register: atacantes
+          changed_when: false
+
+        - name: IPs a bloquear
+          ansible.builtin.set_fact:
+            bloquear: "{{ atacantes.stdout_lines | difference(ips_protegidas + [ip_aap.stdout]) }}"
+
+        - name: Asegurar que firewalld esté activo
+          ansible.builtin.service:
+            name: firewalld
+            state: started
+
+        - name: "Bloquear IPs atacantes por {{ bloqueo_seg }} s"
+          ansible.builtin.command: >
+            firewall-cmd --add-rich-rule='rule family="ipv4" source address="{{ item }}" reject'
+            --timeout={{ bloqueo_seg }}
+          loop: "{{ bloquear }}"
+          register: reglas
+          changed_when: true
+          failed_when: reglas.rc != 0 and 'ALREADY_ENABLED' not in reglas.stderr
+
+        - name: "Dynatrace | Comentario de éxito"
+          ansible.builtin.uri:
+            url: "{{ dt_url }}/api/v2/problems/{{ dt_problem_id }}/comments"
+            method: POST
+            headers:
+              Authorization: "Api-Token {{ dt_token }}"
+            body_format: json
+            body:
+              message: >-
+                ✅ Remediación exitosa: {{ bloquear | length }} IP(s) bloqueada(s) en {{ inventory_hostname }}
+                ({{ bloquear | join(', ') if bloquear else 'ninguna superó el umbral' }}) por {{ (bloqueo_seg / 60) | int }} min.
+                Job: {{ job_url }}
+              context: "Ansible Automation Platform"
+            status_code: [200, 201, 204]
+          delegate_to: localhost
+          become: false
+          when: comentar | bool
+
+        - name: "Dynatrace | Evento en la línea de tiempo del host"
+          ansible.builtin.uri:
+            url: "{{ dt_url }}/api/v2/events/ingest"
+            method: POST
+            headers:
+              Authorization: "Api-Token {{ dt_token }}"
+            body_format: json
+            body:
+              eventType: CUSTOM_INFO
+              title: "Remediación Ansible: IP atacante bloqueada"
+              entitySelector: "type(HOST),entityName.equals({{ inventory_hostname }})"
+              properties:
+                job: "{{ job_url }}"
+                problema: "{{ problem_id | default('') }}"
+                ips_bloqueadas: "{{ bloquear | join(', ') }}"
+            status_code: [200, 201, 202]
+          delegate_to: localhost
+          become: false
+          when: dt_url | length > 0
+
+      rescue:
+        - name: "Dynatrace | Comentario de falla"
+          ansible.builtin.uri:
+            url: "{{ dt_url }}/api/v2/problems/{{ dt_problem_id }}/comments"
+            method: POST
+            headers:
+              Authorization: "Api-Token {{ dt_token }}"
+            body_format: json
+            body:
+              message: "❌ Remediación fallida en {{ inventory_hostname }}: requiere intervención humana. Job: {{ job_url }}"
+              context: "Ansible Automation Platform"
+            status_code: [200, 201, 204]
+          delegate_to: localhost
+          become: false
+          when: comentar | bool
+
+        - name: Marcar el job como fallido
+          ansible.builtin.fail:
+            msg: "La remediación de fuerza bruta SSH falló."

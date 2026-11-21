@@ -1,0 +1,25 @@
+---
+- name: "Caos | Fuerza bruta SSH contra target01 (demo de remediación)"
+  hosts: "{{ attacker_host | default('attacker') }}"
+  gather_facts: false
+
+  vars:
+    victima: "{{ hostvars[target_host | default('target01')]['ansible_host'] | default(target_host | default('target01')) }}"
+    intentos: 40
+    usuarios_falsos: [admin, root1, oracle, test, postgres, ubuntu, deploy, support, guest, backup]
+
+  tasks:
+    - name: "Lanzar {{ intentos }} intentos de login con usuarios inexistentes contra {{ victima }}"
+      ansible.builtin.shell: |
+        for i in $(seq 1 {{ intentos }}); do
+          u=$(echo "{{ usuarios_falsos | join(' ') }}" | tr ' ' '\n' | shuf -n1)
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=3 -o PreferredAuthentications=publickey \
+              "${u}@{{ victima }}" true 2>/dev/null || true
+          sleep 0.5
+        done
+      changed_when: true
+
+    - name: Resumen
+      ansible.builtin.debug:
+        msg: "Ataque simulado terminado: {{ intentos }} intentos fallidos contra {{ victima }}."
