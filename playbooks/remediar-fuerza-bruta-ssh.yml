@@ -12,7 +12,7 @@
     comentar: "{{ (dt_problem_id | default('')) | length > 0 and dt_url | length > 0 }}"
     umbral: 5            # intentos fallidos mínimos para bloquear una IP
     ventana: "-15min"    # ventana de logs de sshd a revisar
-    bloqueo_seg: 900     # el bloqueo expira solo (15 min) para que el laboratorio se reinicie
+    bloqueo_seg: 300     # el bloqueo expira solo (5 min) para que el laboratorio se reinicie
     ips_protegidas: []   # IPs que nunca se bloquean (p. ej. la de AAP), además de la que usa este job
 
   tasks:
