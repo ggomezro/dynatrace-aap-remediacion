@@ -1,0 +1,119 @@
+---
+- name: Remediar CPU al 100%
+  hosts: "{{ target_host | default('target01') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    dt_url: "{{ lookup('ansible.builtin.env', 'DT_URL') }}"
+    dt_token: "{{ lookup('ansible.builtin.env', 'DT_TOKEN') }}"
+    job_id: "{{ awx_job_id | default('manual') }}"
+    job_url: "https://aap.benji-gabo.com/execution/jobs/playbook/{{ job_id }}/output"
+    comentar: "{{ (dt_problem_id | default('')) | length > 0 and dt_url | length > 0 }}"
+    # Solo se detienen procesos de esta lista: nunca se mata "lo que más consuma" a ciegas
+    procesos_permitidos: [stress-ng]
+
+  tasks:
+    - name: "Dynatrace | Comentario de inicio"
+      ansible.builtin.uri:
+        url: "{{ dt_url }}/api/v2/problems/{{ dt_problem_id }}/comments"
+        method: POST
+        headers:
+          Authorization: "Api-Token {{ dt_token }}"
+        body_format: json
+        body:
+          message: "🔥 Remediación iniciada por Ansible (job #{{ job_id }}): analizando consumo de CPU en {{ inventory_hostname }}."
+          context: "Ansible Automation Platform"
+        status_code: [200, 201, 204]
+      delegate_to: localhost
+      become: false
+      when: comentar | bool
+
+    - name: Remediación
+      block:
+        - name: Top 5 de procesos por CPU (evidencia)
+          ansible.builtin.shell: ps -eo pid,comm,%cpu --sort=-%cpu --no-headers | head -5
+          register: top_antes
+          changed_when: false
+
+        - name: Detener los procesos permitidos que saturan la CPU
+          ansible.builtin.command: "pkill -f {{ item }}"
+          loop: "{{ procesos_permitidos }}"
+          register: detenidos
+          changed_when: detenidos.rc == 0
+          failed_when: detenidos.rc not in [0, 1]   # 1 = no había procesos con ese nombre
+
+        - name: Esperar a que la CPU baje
+          ansible.builtin.pause:
+            seconds: 15
+
+        - name: Medir la CPU después de la remediación
+          ansible.builtin.shell: |
+            read -r _ u1 n1 s1 i1 w1 x1 y1 z1 _ < /proc/stat; sleep 3
+            read -r _ u2 n2 s2 i2 w2 x2 y2 z2 _ < /proc/stat
+            total=$(( (u2+n2+s2+i2+w2+x2+y2+z2) - (u1+n1+s1+i1+w1+x1+y1+z1) ))
+            ocioso=$(( (i2+w2) - (i1+w1) ))
+            echo $(( 100 * (total - ocioso) / total ))
+          register: cpu_despues
+          changed_when: false
+
+        - name: Validar que la CPU volvió a la normalidad
+          ansible.builtin.assert:
+            that: cpu_despues.stdout | int < 70
+            fail_msg: "La CPU sigue en {{ cpu_despues.stdout }}%: el consumo viene de un proceso fuera de la lista permitida."
+            success_msg: "CPU en {{ cpu_despues.stdout }}%."
+
+        - name: "Dynatrace | Comentario de éxito"
+          ansible.builtin.uri:
+            url: "{{ dt_url }}/api/v2/problems/{{ dt_problem_id }}/comments"
+            method: POST
+            headers:
+              Authorization: "Api-Token {{ dt_token }}"
+            body_format: json
+            body:
+              message: >-
+                ✅ Remediación exitosa en {{ inventory_hostname }}: procesos detenidos ({{ procesos_permitidos | join(', ') }}),
+                CPU ahora en {{ cpu_despues.stdout }}%. Top antes: {{ top_antes.stdout_lines | join(' | ') }}. Job: {{ job_url }}
+              context: "Ansible Automation Platform"
+            status_code: [200, 201, 204]
+          delegate_to: localhost
+          become: false
+          when: comentar | bool
+
+        - name: "Dynatrace | Evento en la línea de tiempo del host"
+          ansible.builtin.uri:
+            url: "{{ dt_url }}/api/v2/events/ingest"
+            method: POST
+            headers:
+              Authorization: "Api-Token {{ dt_token }}"
+            body_format: json
+            body:
+              eventType: CUSTOM_INFO
+              title: "Remediación Ansible: CPU normalizada"
+              entitySelector: "type(HOST),entityName.equals({{ inventory_hostname }})"
+              properties: "{{ {'job': job_url, 'problema': problem_id | default(''), 'cpu_despues': cpu_despues.stdout ~ '%'} | dict2items | rejectattr('value', 'equalto', '') | items2dict }}"
+            status_code: [200, 201, 202]
+          delegate_to: localhost
+          become: false
+          when: dt_url | length > 0
+          ignore_errors: true  # el evento es informativo: no debe tumbar la remediación
+
+      rescue:
+        - name: "Dynatrace | Comentario de falla"
+          ansible.builtin.uri:
+            url: "{{ dt_url }}/api/v2/problems/{{ dt_problem_id }}/comments"
+            method: POST
+            headers:
+              Authorization: "Api-Token {{ dt_token }}"
+            body_format: json
+            body:
+              message: "❌ Remediación fallida en {{ inventory_hostname }}: requiere intervención humana. Job: {{ job_url }}"
+              context: "Ansible Automation Platform"
+            status_code: [200, 201, 204]
+          delegate_to: localhost
+          become: false
+          when: comentar | bool
+
+        - name: Marcar el job como fallido
+          ansible.builtin.fail:
+            msg: "La remediación de CPU falló."

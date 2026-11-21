@@ -1,0 +1,25 @@
+---
+- name: "Caos | CPU al 100% en target01 (demo de remediación)"
+  hosts: "{{ target_host | default('target01') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    duracion_seg: 900   # si nadie lo detiene, stress-ng termina solo a los 15 min
+
+  tasks:
+    - name: Asegurar que stress-ng esté instalado
+      ansible.builtin.package:
+        name: stress-ng
+        state: present
+
+    - name: Saturar todos los núcleos de CPU en segundo plano
+      ansible.builtin.command: >
+        stress-ng --cpu 0 --cpu-load 100 --timeout {{ duracion_seg }}s
+      async: "{{ duracion_seg + 60 }}"
+      poll: 0
+      changed_when: true
+
+    - name: Resumen
+      ansible.builtin.debug:
+        msg: "stress-ng saturando la CPU de {{ inventory_hostname }} durante máximo {{ duracion_seg // 60 }} min."
