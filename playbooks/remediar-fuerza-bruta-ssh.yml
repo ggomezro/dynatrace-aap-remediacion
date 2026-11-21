@@ -40,7 +40,7 @@
 
         - name: Contar intentos fallidos por IP en los logs de sshd
           ansible.builtin.shell: |
-            journalctl -u sshd --since "{{ ventana }}" --no-pager \
+            journalctl -t sshd -t sshd-session --since "{{ ventana }}" --no-pager \
               | grep -E "Invalid user|Failed password|authenticating user" \
               | grep -oE "from ([0-9]{1,3}\.){3}[0-9]{1,3}" | awk '{print $2}' \
               | sort | uniq -c | awk '$1 >= {{ umbral }} {print $2}'
